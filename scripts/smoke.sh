@@ -35,11 +35,11 @@ echo "Activating devices A and B"
 RESP_A=$(curl -sS -X POST "$SERVER_URL/activate" -H 'Content-Type: application/json' -d '{"pair_id":"demo","side":"A","device_pub":{"x25519":"k"}}')
 RESP_B=$(curl -sS -X POST "$SERVER_URL/activate" -H 'Content-Type: application/json' -d '{"pair_id":"demo","side":"B","device_pub":{"x25519":"k"}}')
 
-DEVICE_A_ID=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["device_id"])' <<<"$RESP_A")
-DEVICE_A_KEY=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$RESP_A")
-POLICY_VERSION=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["policy_version"])' <<<"$RESP_A")
-DEVICE_B_ID=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["device_id"])' <<<"$RESP_B")
-DEVICE_B_KEY=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$RESP_B")
+DEVICE_A_ID=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["device_id"])' <<<"$RESP_A")
+DEVICE_A_KEY=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$RESP_A")
+POLICY_VERSION=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["policy_version"])' <<<"$RESP_A")
+DEVICE_B_ID=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["device_id"])' <<<"$RESP_B")
+DEVICE_B_KEY=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$RESP_B")
 
 echo "Sending initial message A -> B"
 FIRST_MSG=$(curl -sS -X POST "$SERVER_URL/messages/" \
@@ -47,11 +47,11 @@ FIRST_MSG=$(curl -sS -X POST "$SERVER_URL/messages/" \
   -H "X-Device-ID: $DEVICE_A_ID" \
   -H "X-Device-Key: $DEVICE_A_KEY" \
   -d '{"pair_id":"demo","to":"'$DEVICE_B_ID'","recipients":["'$DEVICE_B_ID'"],"header":"demo","ciphertext":"hello","policy_version":'$POLICY_VERSION'}')
-FIRST_MSG_ID=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["message_id"])' <<<"$FIRST_MSG")
+FIRST_MSG_ID=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["message_id"])' <<<"$FIRST_MSG")
 
 echo "Device B fetching inbox"
 INBOX_B=$(curl -sS -H "X-Device-ID: $DEVICE_B_ID" -H "X-Device-Key: $DEVICE_B_KEY" "$SERVER_URL/inbox")
-python - <<'PY' <<<"$INBOX_B"
+python3 - <<'PY' <<<"$INBOX_B"
 import json,sys
 items=json.loads(sys.stdin.read())["items"]
 assert items, "Inbox empty"
@@ -59,7 +59,7 @@ print(f"Inbox count: {len(items)}")
 PY
 
 FETCH_B=$(curl -sS -H "X-Device-ID: $DEVICE_B_ID" -H "X-Device-Key: $DEVICE_B_KEY" "$SERVER_URL/messages/$FIRST_MSG_ID")
-python - <<'PY' <<<"$FETCH_B"
+python3 - <<'PY' <<<"$FETCH_B"
 import json,sys
 msg=json.loads(sys.stdin.read())
 assert msg["ciphertext"]=="hello"
@@ -70,16 +70,16 @@ curl -sS -X POST "$SERVER_URL/acks" -H 'Content-Type: application/json' -H "X-De
 
 echo "Request pairing token"
 PAIR_TOKEN_RESP=$(curl -sS -X POST "$SERVER_URL/pairing/start" -H 'Content-Type: application/json' -H "X-Device-ID: $DEVICE_A_ID" -H "X-Device-Key: $DEVICE_A_KEY" -d '{"side":"A"}')
-PAIR_TOKEN=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["pairing_token"])' <<<"$PAIR_TOKEN_RESP")
+PAIR_TOKEN=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["pairing_token"])' <<<"$PAIR_TOKEN_RESP")
 
 echo "Adding supervisor"
 SUP_RESP=$(curl -sS -X POST "$SERVER_URL/supervisors/add" -H 'Content-Type: application/json' -d '{"pair_id":"demo","side":"A","pairing_token":"'$PAIR_TOKEN'","supervisor":{"display_name":"Parent"}}')
-SUP_ID=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["supervisor_id"])' <<<"$SUP_RESP")
-SUP_KEY=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$SUP_RESP")
+SUP_ID=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["supervisor_id"])' <<<"$SUP_RESP")
+SUP_KEY=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["api_key"])' <<<"$SUP_RESP")
 
 sleep 1
 POLICY=$(curl -sS -H "X-Device-ID: $DEVICE_A_ID" -H "X-Device-Key: $DEVICE_A_KEY" "$SERVER_URL/policy")
-POLICY_VERSION2=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["policy_version"])' <<<"$POLICY")
+POLICY_VERSION2=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["policy_version"])' <<<"$POLICY")
 
 echo "Sending message requiring supervisor wraps"
 SECOND_MSG=$(curl -sS -X POST "$SERVER_URL/messages/" \
@@ -87,11 +87,11 @@ SECOND_MSG=$(curl -sS -X POST "$SERVER_URL/messages/" \
   -H "X-Device-ID: $DEVICE_A_ID" \
   -H "X-Device-Key: $DEVICE_A_KEY" \
   -d '{"pair_id":"demo","to":"'$DEVICE_B_ID'","recipients":["'$DEVICE_B_ID'","'$SUP_ID'"],"header":"demo2","ciphertext":"check","policy_version":'$POLICY_VERSION2'}')
-SECOND_MSG_ID=$(python -c 'import json,sys; print(json.loads(sys.stdin.read())["message_id"])' <<<"$SECOND_MSG")
+SECOND_MSG_ID=$(python3 -c 'import json,sys; print(json.loads(sys.stdin.read())["message_id"])' <<<"$SECOND_MSG")
 
 sleep 1
 SUP_INBOX=$(curl -sS -H "X-Supervisor-ID: $SUP_ID" -H "X-Supervisor-Key: $SUP_KEY" "$SERVER_URL/inbox")
-python - <<'PY' <<<"$SUP_INBOX"
+python3 - <<'PY' <<<"$SUP_INBOX"
 import json,sys
 items=json.loads(sys.stdin.read())["items"]
 assert items, "Supervisor inbox empty"

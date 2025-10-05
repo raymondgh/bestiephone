@@ -65,6 +65,14 @@ func main() {
 		log.Fatalf("ping db: %v", err)
 	}
 
+	absDBPath, err := filepath.Abs(dbPath)
+	if err != nil {
+		log.Printf("warn: resolving absolute db path: %v", err)
+		absDBPath = dbPath
+	}
+	log.Printf("database initialized at %s", absDBPath)
+	log.Printf("to inspect the database, run: sqlite3 %q 'SELECT * FROM pairs;'", absDBPath)
+
 	server := &Server{
 		db:               db,
 		spoolTTL:         getEnvDuration("PC_SPOOL_TTL", 48*time.Hour),

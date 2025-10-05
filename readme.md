@@ -162,3 +162,40 @@ If A‑side supervisors are unreachable (lost phones, etc.), the device can requ
 - Sign headers (Ed25519) and do E2E content with per‑message ephemeral X25519 → HKDF → AEAD. The server checks header presence/versions only.
 - Enforce **fetch‑time authorization** strictly so governance effects apply retroactively to unfetched items.
 
+
+## Local prototype
+
+### Prerequisites
+- Go 1.22+
+- Python 3.10+
+- Streamlit >= 1.32 (`pip install -r apps/requirements.txt`)
+
+### Run the stack (three terminals)
+1. **Server**
+   ```bash
+   export PC_DB_PATH="$(pwd)/paircomm.db"
+   export PC_SPOOL_TTL=172800
+   export PC_SUPERVISOR_WINDOW=2592000
+   export PC_PENDING_WINDOW=86400
+   cd server
+   go run ./cmd/server
+   ```
+2. **Kid app (port 8501)**
+   ```bash
+   cd apps
+   streamlit run kid_app.py --server.port 8501
+   ```
+3. **Parent app (port 8502)**
+   ```bash
+   cd apps
+   streamlit run parent_app.py --server.port 8502
+   ```
+
+Environment variables are optional; defaults are applied if unset. Set `PC_HTTP_ADDR` to change the server bind address (defaults to `:8080`). Set `PC_SERVER_URL` for the Streamlit apps when the server is not on `http://localhost:8080`.
+
+### Smoke test
+Run the automated end-to-end flow:
+```bash
+bash scripts/smoke.sh
+```
+The smoke script binds the API server to `127.0.0.1:18080` by default; override via `PC_SMOKE_PORT`.

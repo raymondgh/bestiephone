@@ -1,0 +1,76 @@
+{
+  "info": {
+    "name": "Pair Communicator Prototype",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{base_url}}/health",
+          "host": ["{{base_url}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Activate",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pair_id\": \"demo\",\n  \"side\": \"A\",\n  \"device_pub\": {\n    \"x25519\": \"placeholder\"\n  }\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/activate",
+          "host": ["{{base_url}}"],
+          "path": ["activate"]
+        }
+      }
+    },
+    {
+      "name": "Policy",
+      "request": {
+        "method": "GET",
+        "header": [
+          {"key": "X-Device-ID", "value": "{{device_id}}"},
+          {"key": "X-Device-Key", "value": "{{device_key}}"}
+        ],
+        "url": {
+          "raw": "{{base_url}}/policy",
+          "host": ["{{base_url}}"],
+          "path": ["policy"]
+        }
+      }
+    },
+    {
+      "name": "Post Message",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key": "Content-Type", "value": "application/json"},
+          {"key": "X-Device-ID", "value": "{{device_id}}"},
+          {"key": "X-Device-Key", "value": "{{device_key}}"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"pair_id\": \"demo\",\n  \"to\": \"{{peer_device_id}}\",\n  \"recipients\": [\"{{peer_device_id}}\"],\n  \"header\": \"demo\",\n  \"ciphertext\": \"hello\",\n  \"policy_version\": {{policy_version}}\n}"
+        },
+        "url": {
+          "raw": "{{base_url}}/messages/",
+          "host": ["{{base_url}}"],
+          "path": ["messages", ""]
+        }
+      }
+    }
+  ],
+  "variable": [
+    {"key": "base_url", "value": "http://localhost:8080"}
+  ]
+}

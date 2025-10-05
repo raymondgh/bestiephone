@@ -3,6 +3,35 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DB_PATH="$(mktemp)"
+SERVER_PID=""
+SERVER_PGID=""
+
+cleanup() {
+  local exit_code=$?
+
+  trap - EXIT ERR INT TERM
+
+  if [[ -n "$SERVER_PGID" ]]; then
+    # Ensure the entire process group is terminated.
+    kill -- -"$SERVER_PGID" 2>/dev/null || true
+  elif [[ -n "$SERVER_PID" ]]; then
+    kill "$SERVER_PID" 2>/dev/null || true
+  fi
+
+  if [[ -n "$SERVER_PID" ]]; then
+    wait "$SERVER_PID" 2>/dev/null || true
+  fi
+
+  rm -f "$ROOT_DIR/server.pid" "$DB_PATH"
+
+  exit "$exit_code"
+}
+
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 1' ERR
+
 export PC_DB_PATH="$DB_PATH"
 export PC_SPOOL_TTL=5
 export PC_SUPERVISOR_WINDOW=8
@@ -23,11 +52,13 @@ rm -f $ROOT_DIR/server.pid >/dev/null 2>&1 || true
 echo "Starting server..."
 (
   cd "$ROOT_DIR/server"
-  go run ./cmd/server &
-  echo $! > "$ROOT_DIR/server.pid"
-)
-SERVER_PID="$(cat "$ROOT_DIR/server.pid")"
-trap 'kill "$SERVER_PID" 2>/dev/null || true; rm -f "$ROOT_DIR/server.pid" "$DB_PATH"' EXIT
+  exec go run ./cmd/server
+) &
+SERVER_PID=$!
+if command -v ps >/dev/null 2>&1; then
+  SERVER_PGID="$(ps -o pgid= "$SERVER_PID" 2>/dev/null | tr -d ' ' || true)"
+fi
+echo "$SERVER_PID" >"$ROOT_DIR/server.pid"
 
 sleep 3
 

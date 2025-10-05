@@ -11,6 +11,12 @@ This document describes the end‑to‑end experience of a **pair‑only** child
 - **Retention**: keep ciphertext long enough for kid delivery (spool TTL, e.g., 48h). If a side has supervisors, keep up to 30 days for that side. After purge, retain signed header + hash + receipts only.
 - **Governance safety**: pairing‑mode required for add/reset; one pending governance event per side; last supervisor on a side cannot remove themselves.
 
+## Encryption model (v1)
+- **Keys**: every device and supervisor holds an Ed25519 signing key and an X25519 key-exchange key. The prototype Streamlit apps generate and persist these seeds under `apps/seeds/` (e.g., `seeds/<pair>_<side>_device.json` or `seeds/parent_<pair>_<side>.json`).
+- **Encrypt on send**: clients call `GET /keys?pair_id=…` to fetch the peer device and all required supervisors' public keys alongside the current `policy_version`. They mint a 32-byte content key, seal it to each recipient via X25519 sealed boxes, encrypt the plaintext with XSalsa20-Poly1305, and attach the wraps in the signed header.
+- **Signatures**: headers include `sig_scheme` `ed25519:v1`. Clients build the canonical `pc-h1|…` payload (sorted recipients with wrap digests) and sign with their Ed25519 secret key. The server verifies signatures and rejects messages with missing wraps, bad base64, or mismatched recipients (`422 ENCRYPTION_REQUIRED` or `422 SIGNATURE_INVALID`).
+- **Server stance**: the backend stores only ciphertext and signed headers. It enforces policy coverage and authenticity but never sees decrypted content.
+
 ---
 
 ## 1) Unbox & turn on (first boot)
@@ -128,6 +134,7 @@ If A‑side supervisors are unreachable (lost phones, etc.), the device can requ
 - `GET  /inbox`
 - `GET  /messages/{msg_id}`
 - `POST /acks`
+- `GET  /keys`
 
 **Ops & visibility**
 - `GET  /audit`

@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,10 +35,12 @@ type Server struct {
 }
 
 type deviceRecord struct {
-	ID     string
-	PairID string
-	Side   string
-	APIKey string
+	ID         string
+	PairID     string
+	Side       string
+	APIKey     string
+	X25519Pub  string
+	Ed25519Pub string
 }
 
 type supervisorRecord struct {
@@ -96,6 +102,7 @@ func main() {
 	router.Post("/activate", server.handleActivate)
 	router.Post("/pairing/start", server.withDeviceAuth(server.handlePairingStart))
 	router.Get("/policy", server.withAnyAuth(server.handleGetPolicy))
+	router.Get("/keys", server.withAnyAuth(server.handleGetKeys))
 	router.Get("/status", server.withAnyAuth(server.handleStatus))
 	router.Post("/supervisors/add", server.handleSupervisorAdd)
 	router.Post("/supervisors/approve", server.withSupervisorAuth(server.handleSupervisorApprove))
@@ -146,6 +153,8 @@ id TEXT PRIMARY KEY,
 pair_id TEXT NOT NULL,
 side TEXT NOT NULL,
 api_key TEXT NOT NULL,
+x25519_pub TEXT,
+ed25519_pub TEXT,
 created_at TIMESTAMP NOT NULL
 );`,
 		`CREATE TABLE IF NOT EXISTS supervisors (
@@ -155,6 +164,8 @@ side TEXT NOT NULL,
 display_name TEXT,
 api_key TEXT NOT NULL,
 status TEXT NOT NULL,
+x25519_pub TEXT,
+ed25519_pub TEXT,
 created_at TIMESTAMP NOT NULL,
 updated_at TIMESTAMP
 );`,
@@ -210,7 +221,44 @@ created_at TIMESTAMP NOT NULL
 			return err
 		}
 	}
+
+	if err := s.ensureColumn(ctx, "devices", "x25519_pub", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "devices", "ed25519_pub", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "supervisors", "x25519_pub", "TEXT"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "supervisors", "ed25519_pub", "TEXT"); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (s *Server) ensureColumn(ctx context.Context, table, column, typ string) error {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, colType string
+		var notnull int
+		var dfltValue sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &colType, &notnull, &dfltValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	_, err = s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, typ))
+	return err
 }
 
 func writeJSON(w http.ResponseWriter, status int, payload any) {
@@ -224,9 +272,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 type activateRequest struct {
-	PairID    string          `json:"pair_id"`
-	Side      string          `json:"side"`
-	DevicePub json.RawMessage `json:"device_pub"`
+	PairID    string `json:"pair_id"`
+	Side      string `json:"side"`
+	DevicePub struct {
+		X25519Pub  string `json:"x25519_pub"`
+		Ed25519Pub string `json:"ed25519_pub"`
+	} `json:"device_pub"`
 }
 
 func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
@@ -243,6 +294,20 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	pairID := strings.TrimSpace(req.PairID)
 	if pairID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pair_id required"})
+		return
+	}
+	x25519Pub := strings.TrimSpace(req.DevicePub.X25519Pub)
+	ed25519Pub := strings.TrimSpace(req.DevicePub.Ed25519Pub)
+	if x25519Pub == "" || ed25519Pub == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "device_pub keys required"})
+		return
+	}
+	if _, err := decodeBase64(x25519Pub); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid x25519_pub"})
+		return
+	}
+	if _, err := decodeBase64(ed25519Pub); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ed25519_pub"})
 		return
 	}
 
@@ -269,7 +334,7 @@ func (s *Server) handleActivate(w http.ResponseWriter, r *http.Request) {
 	deviceID := newID()
 	apiKey := newID()
 	now := time.Now().UTC()
-	if _, err := tx.ExecContext(r.Context(), "INSERT INTO devices(id, pair_id, side, api_key, created_at) VALUES(?,?,?,?,?)", deviceID, pairID, side, apiKey, now); err != nil {
+	if _, err := tx.ExecContext(r.Context(), "INSERT INTO devices(id, pair_id, side, api_key, x25519_pub, ed25519_pub, created_at) VALUES(?,?,?,?,?,?,?)", deviceID, pairID, side, apiKey, x25519Pub, ed25519Pub, now); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device insert failed"})
 		return
 	}
@@ -340,7 +405,7 @@ func (s *Server) authenticateDevice(ctx context.Context, r *http.Request) (devic
 		return deviceRecord{}, errors.New("missing device credentials")
 	}
 	var device deviceRecord
-	err := s.db.QueryRowContext(ctx, "SELECT id, pair_id, side, api_key FROM devices WHERE id = ?", id).Scan(&device.ID, &device.PairID, &device.Side, &device.APIKey)
+	err := s.db.QueryRowContext(ctx, "SELECT id, pair_id, side, api_key, COALESCE(x25519_pub, ''), COALESCE(ed25519_pub, '') FROM devices WHERE id = ?", id).Scan(&device.ID, &device.PairID, &device.Side, &device.APIKey, &device.X25519Pub, &device.Ed25519Pub)
 	if err != nil {
 		return deviceRecord{}, err
 	}
@@ -405,6 +470,10 @@ type addSupervisorRequest struct {
 	PairingToken string `json:"pairing_token"`
 	Supervisor   struct {
 		DisplayName string `json:"display_name"`
+		Keys        struct {
+			X25519Pub  string `json:"x25519_pub"`
+			Ed25519Pub string `json:"ed25519_pub"`
+		} `json:"keys"`
 	} `json:"supervisor"`
 }
 
@@ -419,6 +488,20 @@ func (s *Server) handleSupervisorAdd(w http.ResponseWriter, r *http.Request) {
 	token := strings.TrimSpace(req.PairingToken)
 	if pairID == "" || side == "" || token == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing fields"})
+		return
+	}
+	supX25519 := strings.TrimSpace(req.Supervisor.Keys.X25519Pub)
+	supEd25519 := strings.TrimSpace(req.Supervisor.Keys.Ed25519Pub)
+	if supX25519 == "" || supEd25519 == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "supervisor keys required"})
+		return
+	}
+	if _, err := decodeBase64(supX25519); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid supervisor x25519_pub"})
+		return
+	}
+	if _, err := decodeBase64(supEd25519); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid supervisor ed25519_pub"})
 		return
 	}
 
@@ -467,8 +550,8 @@ func (s *Server) handleSupervisorAdd(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC()
 
 	if countActive == 0 {
-		if _, err := tx.ExecContext(r.Context(), "INSERT INTO supervisors(id, pair_id, side, display_name, api_key, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
-			supervisorID, pairID, side, req.Supervisor.DisplayName, apiKey, "active", now, now); err != nil {
+		if _, err := tx.ExecContext(r.Context(), "INSERT INTO supervisors(id, pair_id, side, display_name, api_key, status, x25519_pub, ed25519_pub, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+			supervisorID, pairID, side, req.Supervisor.DisplayName, apiKey, "active", supX25519, supEd25519, now, now); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "supervisor insert failed"})
 			return
 		}
@@ -506,8 +589,8 @@ func (s *Server) handleSupervisorAdd(w http.ResponseWriter, r *http.Request) {
 	}
 	payloadBytes, _ := json.Marshal(payload)
 	effective := now.Add(s.pendingWindow)
-	if _, err := tx.ExecContext(r.Context(), "INSERT INTO supervisors(id, pair_id, side, display_name, api_key, status, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?)",
-		supervisorID, pairID, side, req.Supervisor.DisplayName, apiKey, "pending", now, now); err != nil {
+	if _, err := tx.ExecContext(r.Context(), "INSERT INTO supervisors(id, pair_id, side, display_name, api_key, status, x25519_pub, ed25519_pub, created_at, updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+		supervisorID, pairID, side, req.Supervisor.DisplayName, apiKey, "pending", supX25519, supEd25519, now, now); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "supervisor pending insert failed"})
 		return
 	}
@@ -797,6 +880,86 @@ func (s *Server) handleSupervisorVeto(w http.ResponseWriter, r *http.Request, su
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "vetoed"})
 }
+
+func (s *Server) handleGetKeys(w http.ResponseWriter, r *http.Request, auth authContext) {
+	pairID := strings.TrimSpace(r.URL.Query().Get("pair_id"))
+	if pairID == "" {
+		if auth.device != nil {
+			pairID = auth.device.PairID
+		} else if auth.supervisor != nil {
+			pairID = auth.supervisor.PairID
+		}
+	}
+	if pairID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "pair_id required"})
+		return
+	}
+	if auth.device != nil && auth.device.PairID != pairID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "pair mismatch"})
+		return
+	}
+	if auth.supervisor != nil && auth.supervisor.PairID != pairID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "pair mismatch"})
+		return
+	}
+
+	var policyVersion int
+	if err := s.db.QueryRowContext(r.Context(), "SELECT policy_version FROM pairs WHERE pair_id = ?", pairID).Scan(&policyVersion); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": "pair not found"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "policy lookup failed"})
+		return
+	}
+
+	deviceMap := map[string]map[string]string{}
+	rows, err := s.db.QueryContext(r.Context(), "SELECT side, id, COALESCE(x25519_pub, ''), COALESCE(ed25519_pub, '') FROM devices WHERE pair_id = ?", pairID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device lookup failed"})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var side, id, x25519Pub, ed25519Pub string
+		if err := rows.Scan(&side, &id, &x25519Pub, &ed25519Pub); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "device scan failed"})
+			return
+		}
+		deviceMap[side] = map[string]string{
+			"device_id":   id,
+			"x25519_pub":  x25519Pub,
+			"ed25519_pub": ed25519Pub,
+		}
+	}
+
+	supervisorMap := map[string][]map[string]string{"A": {}, "B": {}}
+	rows, err = s.db.QueryContext(r.Context(), "SELECT side, id, COALESCE(x25519_pub, ''), COALESCE(ed25519_pub, '') FROM supervisors WHERE pair_id = ? AND status = 'active'", pairID)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "supervisor lookup failed"})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var side, id, x25519Pub, ed25519Pub string
+		if err := rows.Scan(&side, &id, &x25519Pub, &ed25519Pub); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "supervisor scan failed"})
+			return
+		}
+		supervisorMap[side] = append(supervisorMap[side], map[string]string{
+			"account_id":  id,
+			"x25519_pub":  x25519Pub,
+			"ed25519_pub": ed25519Pub,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"pair_id":        pairID,
+		"policy_version": policyVersion,
+		"devices":        deviceMap,
+		"supervisors":    supervisorMap,
+	})
+}
 func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request, auth authContext) {
 	pairID := ""
 	if auth.device != nil {
@@ -906,12 +1069,35 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request, auth authC
 }
 
 type postMessageRequest struct {
-	PairID        string   `json:"pair_id"`
-	To            string   `json:"to"`
-	Recipients    []string `json:"recipients"`
-	Header        string   `json:"header"`
-	Ciphertext    string   `json:"ciphertext"`
-	PolicyVersion int      `json:"policy_version"`
+	PairID        string          `json:"pair_id"`
+	To            string          `json:"to"`
+	Recipients    []string        `json:"recipients"`
+	Header        json.RawMessage `json:"header"`
+	Ciphertext    string          `json:"ciphertext"`
+	PolicyVersion int             `json:"policy_version"`
+}
+
+type messageHeader struct {
+	MsgID         string            `json:"msg_id"`
+	FromDeviceID  string            `json:"from_device_id"`
+	PolicyVersion int               `json:"policy_version"`
+	CreatedAt     string            `json:"created_at"`
+	Enc           encryptionInfo    `json:"enc"`
+	Recipients    []headerRecipient `json:"recipients"`
+	SigScheme     string            `json:"sig_scheme"`
+	Signature     string            `json:"signature"`
+}
+
+type encryptionInfo struct {
+	Cipher  string `json:"cipher"`
+	Wrap    string `json:"wrap"`
+	Version string `json:"ver"`
+}
+
+type headerRecipient struct {
+	Type string `json:"type"`
+	ID   string `json:"id"`
+	Wrap string `json:"wrap"`
 }
 
 func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, device deviceRecord) {
@@ -940,17 +1126,109 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 		return
 	}
 
-	recipientSet := map[string]struct{}{}
+	if len(req.Header) == 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+		return
+	}
+
+	var header messageHeader
+	if err := json.Unmarshal(req.Header, &header); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid header"})
+		return
+	}
+	header.MsgID = strings.TrimSpace(header.MsgID)
+	if header.MsgID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "msg_id required"})
+		return
+	}
+	header.FromDeviceID = strings.TrimSpace(header.FromDeviceID)
+	if header.FromDeviceID != device.ID {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "SIGNATURE_INVALID"})
+		return
+	}
+	if header.PolicyVersion != req.PolicyVersion {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "policy_version mismatch"})
+		return
+	}
+	header.CreatedAt = strings.TrimSpace(header.CreatedAt)
+	if _, err := time.Parse(time.RFC3339Nano, header.CreatedAt); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid created_at"})
+		return
+	}
+	header.SigScheme = strings.TrimSpace(header.SigScheme)
+	if header.SigScheme != "ed25519:v1" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "SIGNATURE_INVALID"})
+		return
+	}
+	header.Enc.Cipher = strings.ToLower(strings.TrimSpace(header.Enc.Cipher))
+	header.Enc.Wrap = strings.ToLower(strings.TrimSpace(header.Enc.Wrap))
+	header.Enc.Version = strings.TrimSpace(header.Enc.Version)
+	if header.Enc.Cipher != "xsalsa20poly1305" || header.Enc.Wrap != "sealedbox" || header.Enc.Version != "v1" {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+		return
+	}
+
+	normalizedRecipients := make([]headerRecipient, 0, len(header.Recipients))
+	recipientMeta := make(map[string]headerRecipient)
+	for _, rec := range header.Recipients {
+		typ := strings.ToLower(strings.TrimSpace(rec.Type))
+		if typ != "device" && typ != "supervisor" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid recipient type"})
+			return
+		}
+		id := strings.TrimSpace(rec.ID)
+		if id == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "recipient id required"})
+			return
+		}
+		wrap := strings.TrimSpace(rec.Wrap)
+		if wrap == "" {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+			return
+		}
+		if _, err := decodeBase64(wrap); err != nil {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+			return
+		}
+		if _, exists := recipientMeta[id]; exists {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "duplicate recipient"})
+			return
+		}
+		sanitized := headerRecipient{Type: typ, ID: id, Wrap: wrap}
+		normalizedRecipients = append(normalizedRecipients, sanitized)
+		recipientMeta[id] = sanitized
+	}
+	if len(normalizedRecipients) == 0 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+		return
+	}
+	header.Recipients = normalizedRecipients
+
+	bodyRecipientSet := map[string]struct{}{}
 	for _, id := range req.Recipients {
-		id = strings.TrimSpace(id)
-		if id != "" {
-			recipientSet[id] = struct{}{}
+		trimmed := strings.TrimSpace(id)
+		if trimmed != "" {
+			bodyRecipientSet[trimmed] = struct{}{}
 		}
 	}
-	if _, ok := recipientSet[req.To]; !ok {
+	if len(bodyRecipientSet) != len(recipientMeta) {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
 		return
 	}
+	for id := range bodyRecipientSet {
+		if _, ok := recipientMeta[id]; !ok {
+			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
+			return
+		}
+	}
+
+	ciphertextB64 := strings.TrimSpace(req.Ciphertext)
+	cipherBytes, err := decodeBase64(ciphertextB64)
+	if err != nil || len(cipherBytes) < 40 {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "ENCRYPTION_REQUIRED"})
+		return
+	}
+	req.Ciphertext = ciphertextB64
 
 	devices := policy["devices"].(map[string]string)
 	peerSide := "A"
@@ -958,13 +1236,33 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 		peerSide = "B"
 	}
 	peerID := devices[peerSide]
-	if peerID == "" || peerID != req.To {
+	toID := strings.TrimSpace(req.To)
+	if toID == "" || peerID == "" || toID != peerID {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
+		return
+	}
+	peerRec, ok := recipientMeta[toID]
+	if !ok || peerRec.Type != "device" {
 		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
 		return
 	}
 
-	requiredRecipients := []string{peerID}
 	supervisors := policy["supervisors"].(map[string][]map[string]any)
+	for id, rec := range recipientMeta {
+		if rec.Type == "device" {
+			if id != devices["A"] && id != devices["B"] {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
+				return
+			}
+		} else {
+			if findSupervisorSide(supervisors, id) == "" {
+				writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
+				return
+			}
+		}
+	}
+
+	requiredRecipients := []string{peerID}
 	for _, side := range []string{device.Side, peerSide} {
 		for _, sup := range supervisors[side] {
 			if status, ok := sup["status"].(string); ok && status == "active" {
@@ -975,13 +1273,34 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 		}
 	}
 	for _, reqID := range requiredRecipients {
-		if _, ok := recipientSet[reqID]; !ok {
+		if _, ok := recipientMeta[reqID]; !ok {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "INVALID_RECIPIENTS"})
 			return
 		}
 	}
 
-	messageID := newID()
+	header.Signature = strings.TrimSpace(header.Signature)
+	signatureBytes, err := decodeBase64(header.Signature)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "SIGNATURE_INVALID"})
+		return
+	}
+	pubKey, err := decodeBase64(strings.TrimSpace(device.Ed25519Pub))
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sender key invalid"})
+		return
+	}
+	payload, err := sigPayloadFor(header)
+	if err != nil {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "SIGNATURE_INVALID"})
+		return
+	}
+	if !ed25519.Verify(ed25519.PublicKey(pubKey), []byte(payload), signatureBytes) {
+		writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": "SIGNATURE_INVALID"})
+		return
+	}
+
+	messageID := header.MsgID
 	now := time.Now().UTC()
 	retention := now.Add(s.spoolTTL)
 	for _, side := range []string{device.Side, peerSide} {
@@ -993,6 +1312,12 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 		}
 	}
 
+	headerBytes, err := json.Marshal(header)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "header marshal failed"})
+		return
+	}
+
 	tx, err := s.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tx failed"})
@@ -1001,26 +1326,27 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 	defer tx.Rollback()
 
 	_, err = tx.ExecContext(r.Context(), "INSERT INTO messages(id, pair_id, from_device_id, header, ciphertext, created_at, retention_until, policy_version) VALUES(?,?,?,?,?,?,?,?)",
-		messageID, device.PairID, device.ID, req.Header, req.Ciphertext, now, retention, req.PolicyVersion)
+		messageID, device.PairID, device.ID, string(headerBytes), ciphertextB64, now, retention, req.PolicyVersion)
 	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "duplicate message"})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "message insert failed"})
 		return
 	}
 
-	for id := range recipientSet {
-		recipientType := "device"
+	for id, rec := range recipientMeta {
+		recipientType := rec.Type
 		side := ""
-		if id == devices["A"] {
-			side = "A"
-		}
-		if id == devices["B"] {
-			side = "B"
-		}
-		if id != devices["A"] && id != devices["B"] {
-			recipientType = "supervisor"
-			if supSide := findSupervisorSide(supervisors, id); supSide != "" {
-				side = supSide
+		if rec.Type == "device" {
+			if id == devices["A"] {
+				side = "A"
+			} else if id == devices["B"] {
+				side = "B"
 			}
+		} else {
+			side = findSupervisorSide(supervisors, id)
 		}
 		required := 0
 		for _, reqID := range requiredRecipients {
@@ -1042,7 +1368,7 @@ func (s *Server) handlePostMessage(w http.ResponseWriter, r *http.Request, devic
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"message_id": messageID, "created_at": now.Format(time.RFC3339)})
+	writeJSON(w, http.StatusCreated, map[string]any{"message_id": messageID, "created_at": now.Format(time.RFC3339)})
 }
 
 func activeSupervisors(list []map[string]any) []map[string]any {
@@ -1064,6 +1390,41 @@ func findSupervisorSide(supervisors map[string][]map[string]any, id string) stri
 		}
 	}
 	return ""
+}
+
+func decodeBase64(input string) ([]byte, error) {
+	return base64.StdEncoding.DecodeString(input)
+}
+
+func sortedRecipients(recipients []headerRecipient) []headerRecipient {
+	out := make([]headerRecipient, len(recipients))
+	copy(out, recipients)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Type == out[j].Type {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Type < out[j].Type
+	})
+	return out
+}
+
+func sigPayloadFor(header messageHeader) (string, error) {
+	sorted := sortedRecipients(header.Recipients)
+	parts := make([]string, 0, len(sorted))
+	for _, rec := range sorted {
+		wrapBytes, err := decodeBase64(rec.Wrap)
+		if err != nil {
+			return "", err
+		}
+		sum := sha256.Sum256(wrapBytes)
+		whex := hex.EncodeToString(sum[:])
+		if len(whex) > 16 {
+			whex = whex[:16]
+		}
+		parts = append(parts, fmt.Sprintf("%s:%s:%s", rec.Type, rec.ID, whex))
+	}
+	payload := fmt.Sprintf("pc-h1|%s|%s|%d|%s|recips=%s", header.MsgID, header.FromDeviceID, header.PolicyVersion, header.CreatedAt, strings.Join(parts, ","))
+	return payload, nil
 }
 
 func (s *Server) handleInbox(w http.ResponseWriter, r *http.Request, auth authContext) {

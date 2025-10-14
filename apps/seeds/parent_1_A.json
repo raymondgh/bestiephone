@@ -1,0 +1,11 @@
+{
+  "kind": "parent",
+  "ed25519": {
+    "private": "+Yl8xac8Wr5AEgoVk3qzAuFCEqRFk8qdi2XDc10KvJ8=",
+    "public": "qFm4xZMK3mcyk1ihlvJ0fMs3OSLUaNu6Qs/IJ83d9TU="
+  },
+  "x25519": {
+    "private": "6mHEexMjrqKBxS+gzSeK4F7XDuHT8CnuVm6W643cDf0=",
+    "public": "NHW8oMfqhvsUlZ2WF0mFN15E+7NgB0FQ4/foVqWr30M="
+  }
+}

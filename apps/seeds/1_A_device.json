@@ -1,0 +1,11 @@
+{
+  "kind": "device",
+  "ed25519": {
+    "private": "mAb97bYuuMt31g0ZFoExxWowdRbwNK10qfxw9yvJdvM=",
+    "public": "7Od9GDzFiYOwiL9/nzFnwRtRJJqRxtYfehE+6VDkIHU="
+  },
+  "x25519": {
+    "private": "eyzlUThmZGwkX1z3mQCE89URa9u5JEor7GGJyBcshGY=",
+    "public": "86J2UV4hVkO0uO5Exo+MovQA2HGF+PeT0yhu8UpITxU="
+  }
+}
